@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -25,22 +26,30 @@ type Client struct {
 	IP           net.IP
 }
 
+// ErrKeyLength is returned when the key is not 32 bytes
+var ErrKeyLength = fmt.Errorf("key must be 32 bytes")
+
 // NewClient will return a new client
-func NewClient(key, hmacKey string) *Client {
+func NewClient(key, hmacKey string) (c *Client, err error) {
 	decodedKey, err := hex.DecodeString(key)
 	if err != nil {
-		return nil
+		err = errors.Join(err, ErrKeyLength)
+		return
 	}
 	decodedHmacKey, err := hex.DecodeString(hmacKey)
 	if err != nil {
-		return nil
+		err = errors.Join(err, ErrKeyLength)
+		return
 	}
-	c := &Client{
+	c = &Client{
 		key:     decodedKey,
 		hmacKey: decodedHmacKey,
 	}
-	c.IP, _ = c.publicIP()
-	return c
+	c.IP, err = c.publicIP()
+	if err != nil {
+		return
+	}
+	return
 }
 
 // Auth is the main function for the client
@@ -116,7 +125,8 @@ func pad(src []byte) []byte {
 }
 
 func (c *Client) prefixHMAC(message []byte) (out []byte) {
-	mac := hmac.New(sha256.New, []byte(c.hmacKey))
+	mac := hmac.New(sha256.New, c.hmacKey)
+	mac.Write(message)
 	out = make([]byte, len(message)+mac.Size())
 	copy(out, mac.Sum(nil))
 	copy(out[mac.Size():], message)

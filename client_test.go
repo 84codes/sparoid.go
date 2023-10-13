@@ -6,14 +6,33 @@ import (
 	"testing"
 
 	//"golang.org/x/crypto/ssh"
+	"errors"
 	"regexp"
 )
 
 var (
-	key     = "0000000000000000000000000000000000000000000000000000000000000000"
-	hmacKey = "0000000000000000000000000000000000000000000000000000000000000000"
-	client  = NewClient(key, hmacKey)
+	key       = "0000000000000000000000000000000000000000000000000000000000000000"
+	hmacKey   = "0000000000000000000000000000000000000000000000000000000000000000"
+	client, _ = NewClient(key, hmacKey)
 )
+
+func TestClientCreatesNewClient(t *testing.T) {
+	client, err := NewClient(key, hmacKey)
+	if err != nil {
+		t.Errorf("Expected no error %s", err)
+	}
+	if client == nil {
+		t.Errorf("Expected client to be created")
+	}
+}
+
+func TestClientGuardsAgainstShortKeys(t *testing.T) {
+	_, err1 := NewClient("short", hmacKey)
+	_, err2 := NewClient(key, "short")
+	if errors.Is(err1, ErrKeyLength) == false && errors.Is(err2, ErrKeyLength) == false {
+		t.Errorf("Expected ErrKeyLength")
+	}
+}
 
 func TestClientResolvesPublicIP(t *testing.T) {
 	ip, err := client.publicIP()
@@ -96,8 +115,15 @@ func TestClientOpensPortForPassedInIPArgument(t *testing.T) {
 	}
 }
 
+func TestPad(t *testing.T) {
+	message := []byte("hello")
+	padded := pad(message)
+	if len(padded) != 16 {
+		t.Errorf("Expected padded message length to be 16, got %d", len(padded))
+	}
+}
+
 func TestCanConnectToSparoidServer(t *testing.T) {
-	t.Skip("Skipping integration test")
 	clusterName := "localhost"
 	err := client.Auth(clusterName, 8484)
 	if err != nil {

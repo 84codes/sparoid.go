@@ -9,6 +9,7 @@ import (
 	"github.com/84codes/sparoid.go"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func main() {
@@ -50,12 +51,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create cert signer: %v", err)
 	}
+	knownhostsCallback, err := knownhosts.New(fmt.Sprintf("%s/.ssh/known_hosts", os.Getenv("HOME")))
+	if err != nil {
+		log.Fatal("Failed to load known hosts", err)
+	}
 	config := &ssh.ClientConfig{
 		User: "ubuntu",
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(certSigner),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: knownhostsCallback,
 	}
 	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:22", hostname), config)
 	if err != nil {

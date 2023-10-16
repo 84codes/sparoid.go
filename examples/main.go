@@ -18,7 +18,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to create client check key lengths", err)
 	}
-	hostname := "common-01.db.elephantsql.com"
+	hostname := os.Getenv("SPAROID_SERVER_HOSTNAME")
 	err = sparoid.Auth(hostname, 8484)
 	if err != nil {
 		log.Fatal("Auth failed", err)

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net"
 	"os"
 
 	"github.com/84codes/sparoid.go"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
@@ -23,34 +25,15 @@ func main() {
 	if err != nil {
 		log.Fatal("Auth failed", err)
 	}
-	//var hostKey ssh.PublicKey
-	// An SSH client is represented with a ClientConn.
-	//
-	// To authenticate with the remote server you must pass at least one
-	// implementation of AuthMethod via the Auth field in ClientConfig,
-	// and provide a HostKeyCallback.
-	key, err := os.ReadFile(fmt.Sprintf("%s/.ssh/id_ed25519", os.Getenv("HOME")))
+
+	socket := os.Getenv("SSH_AUTH_SOCK")
+	conn, err := net.Dial("unix", socket)
 	if err != nil {
-		log.Fatal("Failed to load private key", err)
+		log.Fatalf("Failed to open SSH_AUTH_SOCK: %v", err)
 	}
 
-	signer, err := ssh.ParsePrivateKeyWithPassphrase(key, []byte(os.Getenv("SSH_PASS")))
-	if err != nil {
-		log.Fatal("Failed to parse private key", err)
-	}
+	agentClient := agent.NewClient(conn)
 
-	publicKey, err := os.ReadFile(fmt.Sprintf("%s/.ssh/id_ed25519-cert.pub", os.Getenv("HOME")))
-	if err != nil {
-		log.Fatal("Failed to load public key", err)
-	}
-	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(publicKey)
-	if err != nil {
-		log.Fatal("Failed to parse public key", err)
-	}
-	certSigner, err := ssh.NewCertSigner(pubKey.(*ssh.Certificate), signer)
-	if err != nil {
-		log.Fatalf("failed to create cert signer: %v", err)
-	}
 	knownhostsCallback, err := knownhosts.New(fmt.Sprintf("%s/.ssh/known_hosts", os.Getenv("HOME")))
 	if err != nil {
 		log.Fatal("Failed to load known hosts", err)
@@ -58,10 +41,11 @@ func main() {
 	config := &ssh.ClientConfig{
 		User: "ubuntu",
 		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(certSigner),
+			ssh.PublicKeysCallback(agentClient.Signers),
 		},
 		HostKeyCallback: knownhostsCallback,
 	}
+	// An SSH client is represented with a ClientConn.
 	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:22", hostname), config)
 	if err != nil {
 		log.Fatal("Failed to dial: ", err)

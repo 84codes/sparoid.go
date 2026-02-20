@@ -1,13 +1,9 @@
 package sparoid
 
 import (
-	//"bytes"
+	"errors"
 	"net"
 	"testing"
-
-	//"golang.org/x/crypto/ssh"
-	"errors"
-	"regexp"
 )
 
 var (
@@ -15,6 +11,12 @@ var (
 	hmacKey   = "0000000000000000000000000000000000000000000000000000000000000000"
 	client, _ = NewClient(key, hmacKey)
 )
+
+func ipNet(cidr string) net.IPNet {
+	ip, n, _ := net.ParseCIDR(cidr)
+	n.IP = ip // preserve the host IP, not the masked network address
+	return *n
+}
 
 func TestClientCreatesNewClient(t *testing.T) {
 	client, err := NewClient(key, hmacKey)
@@ -34,84 +36,108 @@ func TestClientGuardsAgainstShortKeys(t *testing.T) {
 	}
 }
 
-func TestClientResolvesPublicIP(t *testing.T) {
-	ip, err := client.publicIP()
-	if err != nil {
-		t.Errorf("Expected no error %s", err)
-	}
-	match, err := regexp.MatchString(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`, ip.String())
-	if err != nil {
-		t.Errorf("Expected no error %s", err)
-	}
-	if !match {
-		t.Errorf("Expected IP address to match pattern")
-	}
-}
-
-func TestClientCreatesAMessage(t *testing.T) {
-	message := client.message()
-	if len(message) != 32 {
-		t.Errorf("Expected message length to be 32, got %d", len(message))
-	}
-}
-
 func TestClientEncryptsMessages(t *testing.T) {
-	message := client.message()
-	encrypted, err := client.encrypt(message)
+	c := &Client{key: client.key, hmacKey: client.hmacKey, IPs: []net.IPNet{ipNet("127.0.0.1/32")}}
+	msg, err := MessageV2(net.ParseIP("127.0.0.1"), 32)
 	if err != nil {
-		t.Errorf("Expected no error %s", err)
-		t.FailNow()
+		t.Fatalf("unexpected error: %s", err)
 	}
-	t.Logf("Encrypted message: %x", encrypted)
+	encrypted, err := c.encrypt(msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	// 34 bytes padded to 48 + 16 IV = 64
 	if len(encrypted) != 64 {
 		t.Errorf("Expected encrypted message length to be 64, got %d", len(encrypted))
 	}
 }
 
 func TestClientAddsHMAC(t *testing.T) {
-	message := client.message()
-	encrypted, _ := client.encrypt(message)
-	prefixed := client.prefixHMAC(encrypted)
+	c := &Client{key: client.key, hmacKey: client.hmacKey, IPs: []net.IPNet{ipNet("127.0.0.1/32")}}
+	msg, _ := MessageV2(net.ParseIP("127.0.0.1"), 32)
+	encrypted, _ := c.encrypt(msg)
+	prefixed := c.prefixHMAC(encrypted)
+	// 64 encrypted + 32 HMAC = 96
 	if len(prefixed) != 96 {
 		t.Errorf("Expected prefixed message length to be 96, got %d", len(prefixed))
 	}
 }
 
-func TestClientSendsMessage(t *testing.T) {
+func TestClientSendsIPv4Packet(t *testing.T) {
 	server, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	defer server.Close()
 	port := server.LocalAddr().(*net.UDPAddr).Port
+
+	c := &Client{key: client.key, hmacKey: client.hmacKey, IPs: []net.IPNet{ipNet("127.0.0.1/32")}}
 	go func() {
-		err := client.Auth("127.0.0.1", port)
+		err := c.Auth("127.0.0.1", port)
 		if err != nil {
 			t.Errorf("Expected no error %s", err)
 		}
 	}()
+
 	buf := make([]byte, 512)
+	// v2 IPv4 (34 bytes -> pad to 48 -> +16 IV = 64 encrypted -> +32 HMAC = 96)
 	n, _, err := server.ReadFrom(buf)
 	if err != nil {
-		t.Errorf("Expected no error %s", err)
+		t.Fatalf("Expected no error %s", err)
 	}
 	if n != 96 {
-		t.Errorf("Expected received message length to be 96 got %d", n)
+		t.Errorf("Expected packet length to be 96, got %d", n)
 	}
 }
 
-func TestClientOpensPortForPassedInIPArgument(t *testing.T) {
-	ip := "127.0.0.1"
+func TestClientSendsIPv6Packet(t *testing.T) {
 	server, _ := net.ListenPacket("udp", "127.0.0.1:0")
 	defer server.Close()
 	port := server.LocalAddr().(*net.UDPAddr).Port
+
+	c := &Client{key: client.key, hmacKey: client.hmacKey, IPs: []net.IPNet{ipNet("2001:db8::1/64")}}
 	go func() {
-		err := client.Auth(ip, port)
+		err := c.send("127.0.0.1", port)
 		if err != nil {
 			t.Errorf("Expected no error %s", err)
 		}
 	}()
+
 	buf := make([]byte, 512)
-	n, _, _ := server.ReadFrom(buf)
+
+	// v2 IPv6 (46 bytes -> pad to 48 -> +16 IV = 64 encrypted -> +32 HMAC = 96)
+	n, _, err := server.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("Expected no error %s", err)
+	}
 	if n != 96 {
-		t.Errorf("Expected received message length to be 96, got %d", n)
+		t.Errorf("Expected v2 IPv6 packet length to be 96, got %d", n)
+	}
+}
+
+func TestClientSendsBothIPv4AndIPv6(t *testing.T) {
+	server, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	defer server.Close()
+	port := server.LocalAddr().(*net.UDPAddr).Port
+
+	c := &Client{
+		key: client.key, hmacKey: client.hmacKey,
+		IPs: []net.IPNet{ipNet("127.0.0.1/32"), ipNet("2001:db8::1/64")},
+	}
+	go func() {
+		err := c.send("127.0.0.1", port)
+		if err != nil {
+			t.Errorf("Expected no error %s", err)
+		}
+	}()
+
+	buf := make([]byte, 512)
+	// Expect 2 packets: v2 IPv4 + v2 IPv6 (IPv4 first)
+	for i := 0; i < 2; i++ {
+		n, _, err := server.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("packet %d: unexpected error: %s", i, err)
+		}
+		if n != 96 {
+			t.Errorf("packet %d: expected length 96, got %d", i, n)
+		}
 	}
 }
 

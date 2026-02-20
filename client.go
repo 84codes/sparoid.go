@@ -2,18 +2,19 @@ package sparoid
 
 import (
 	"bytes"
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,7 +24,7 @@ const VERSION = "0.0.1"
 // Client is the main struct for the client
 type Client struct {
 	key, hmacKey []byte
-	IP           net.IP
+	IPs          []net.IPNet
 }
 
 // ErrKeyLength is returned when the key is not 32 bytes
@@ -45,61 +46,83 @@ func NewClient(key, hmacKey string) (c *Client, err error) {
 		key:     decodedKey,
 		hmacKey: decodedHmacKey,
 	}
-	c.IP, err = c.publicIP()
-	if err != nil {
-		return
-	}
+	c.resolvePublicIPs()
 	return
 }
 
 // Auth is the main function for the client
 func (c *Client) Auth(host string, port int) (err error) {
-	c.IP, err = c.publicIP()
-	if err != nil {
-		return
-	}
+	c.resolvePublicIPs()
 	return c.send(host, port)
 }
 
-func (c *Client) publicIP() (net.IP, error) {
-	if c.IP != nil {
-		return c.IP, nil
+func (c *Client) resolvePublicIPs() {
+	if len(c.IPs) > 0 {
+		return
 	}
-	resolver := net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{}
-			return d.DialContext(ctx, "udp", "208.67.222.222:53")
-		},
+	var v4 net.IP
+	var v6nets []net.IPNet
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		v4 = fetchPublicIP("https://ipv4.icanhazip.com")
+	})
+	wg.Go(func() {
+		v6nets = globalIPv6FromInterfaces()
+		if len(v6nets) == 0 {
+			if ip := fetchPublicIP("https://ipv6.icanhazip.com"); ip != nil {
+				v6nets = []net.IPNet{{IP: ip, Mask: net.CIDRMask(128, 128)}}
+			}
+		}
+	})
+	wg.Wait()
+	if v4 != nil {
+		c.IPs = append(c.IPs, net.IPNet{IP: v4.To4(), Mask: net.CIDRMask(32, 32)})
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	ip, err := resolver.LookupHost(ctx, "myip.opendns.com")
-	if err != nil {
-		return nil, err
-	}
-
-	return net.ParseIP(ip[0]), nil
+	c.IPs = append(c.IPs, v6nets...)
 }
 
-func (c *Client) message() []byte {
-	version := uint32(1)
-	ts := uint64(time.Now().UTC().UnixNano() / int64(time.Millisecond))
-	nounce := make([]byte, 16)
-	rand.Read(nounce)
-	ipBytes := c.IP.To4()
+func fetchPublicIP(url string) net.IP {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(strings.TrimSpace(string(body)))
+}
 
-	buf := make([]byte, 4+8+16+4)
-	binary.BigEndian.PutUint32(buf[0:4], version)
-	binary.BigEndian.PutUint64(buf[4:12], ts)
-	copy(buf[12:28], nounce)
-	copy(buf[28:32], ipBytes)
-
-	return buf
+func globalIPv6FromInterfaces() []net.IPNet {
+	var result []net.IPNet
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if ipNet.IP.To4() != nil {
+				continue
+			}
+			if ipNet.IP.IsGlobalUnicast() && !ipNet.IP.IsPrivate() {
+				result = append(result, *ipNet)
+			}
+		}
+	}
+	return result
 }
 
 func (c *Client) encrypt(message []byte) (out []byte, err error) {
-	// convert key hexstring to bytes
 	block, err := aes.NewCipher(c.key)
 	if err != nil {
 		return
@@ -107,7 +130,6 @@ func (c *Client) encrypt(message []byte) (out []byte, err error) {
 
 	message = pad(message)
 	out = make([]byte, aes.BlockSize+len(message))
-	//iv is the ciphertext up to the blocksize (16)
 	iv := out[:aes.BlockSize]
 	if _, err = io.ReadFull(rand.Reader, iv); err != nil {
 		return
@@ -134,20 +156,47 @@ func (c *Client) prefixHMAC(message []byte) (out []byte) {
 }
 
 func (c *Client) send(host string, port int) error {
-	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	addrs, err := net.LookupHost(host)
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialUDP("udp", nil, serverAddr)
-	if err != nil {
-		return err
+	for _, addr := range addrs {
+		serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr, fmt.Sprintf("%d", port)))
+		if err != nil {
+			return err
+		}
+		conn, err := net.DialUDP("udp", nil, serverAddr)
+		if err != nil {
+			return err
+		}
+		if err := c.sendAllPackets(conn); err != nil {
+			conn.Close()
+			return err
+		}
+		conn.Close()
 	}
-	defer conn.Close()
-	encrypted, err := c.encrypt(c.message())
+	return nil
+}
+
+func (c *Client) sendAllPackets(conn *net.UDPConn) error {
+	var errs []error
+	for _, ipNet := range c.IPs {
+		ones, _ := ipNet.Mask.Size()
+		if msg, err := MessageV2(ipNet.IP, uint8(ones)); err != nil {
+			errs = append(errs, err)
+		} else {
+			errs = append(errs, c.sendPacket(conn, msg))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (c *Client) sendPacket(conn *net.UDPConn, msg []byte) error {
+	encrypted, err := c.encrypt(msg)
 	if err != nil {
 		return err
 	}
 	prefixed := c.prefixHMAC(encrypted)
-	conn.Write(prefixed)
+	_, err = conn.Write(prefixed)
 	return err
 }

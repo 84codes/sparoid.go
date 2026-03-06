@@ -6,50 +6,38 @@ import (
 	"testing"
 )
 
-func TestMessageV2IPv4(t *testing.T) {
+func TestMessageIPv4(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
-	msg, err := MessageV2(ip, 32)
+	msg, err := Message(ip)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if len(msg) != 34 {
-		t.Fatalf("expected 34 bytes, got %d", len(msg))
+	if len(msg) != 32 {
+		t.Fatalf("expected 32 bytes, got %d", len(msg))
 	}
 	version := binary.BigEndian.Uint32(msg[0:4])
-	if version != 2 {
-		t.Errorf("expected version 2, got %d", version)
+	if version != 1 {
+		t.Errorf("expected version 1, got %d", version)
 	}
-	if msg[28] != 4 {
-		t.Errorf("expected family 4, got %d", msg[28])
-	}
-	if !net.IP(msg[29:33]).Equal(ip.To4()) {
-		t.Errorf("expected IP %s at offset 29, got %s", ip, net.IP(msg[29:33]))
-	}
-	if msg[33] != 32 {
-		t.Errorf("expected range 32, got %d", msg[33])
+	if !net.IP(msg[28:32]).Equal(ip.To4()) {
+		t.Errorf("expected IP %s at offset 28, got %s", ip, net.IP(msg[28:32]))
 	}
 }
 
-func TestMessageV2IPv6(t *testing.T) {
+func TestMessageIPv6(t *testing.T) {
 	ip := net.ParseIP("2001:db8::1")
-	msg, err := MessageV2(ip, 128)
+	msg, err := Message(ip)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
-	if len(msg) != 46 {
-		t.Fatalf("expected 46 bytes, got %d", len(msg))
+	if len(msg) != 44 {
+		t.Fatalf("expected 44 bytes, got %d", len(msg))
 	}
 	version := binary.BigEndian.Uint32(msg[0:4])
-	if version != 2 {
-		t.Errorf("expected version 2, got %d", version)
+	if version != 1 {
+		t.Errorf("expected version 1, got %d", version)
 	}
-	if msg[28] != 6 {
-		t.Errorf("expected family 6, got %d", msg[28])
-	}
-	if !net.IP(msg[29:45]).Equal(ip) {
-		t.Errorf("expected IP %s at offset 29, got %s", ip, net.IP(msg[29:45]))
-	}
-	if msg[45] != 128 {
-		t.Errorf("expected range 128, got %d", msg[45])
+	if !net.IP(msg[28:44]).Equal(ip) {
+		t.Errorf("expected IP %s at offset 28, got %s", ip, net.IP(msg[28:44]))
 	}
 }

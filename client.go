@@ -24,7 +24,7 @@ const VERSION = "0.0.1"
 // Client is the main struct for the client
 type Client struct {
 	key, hmacKey []byte
-	IPs          []net.IPNet
+	IPs          []net.IP
 }
 
 // ErrKeyLength is returned when the key is not 32 bytes
@@ -61,24 +61,24 @@ func (c *Client) resolvePublicIPs() {
 		return
 	}
 	var v4 net.IP
-	var v6nets []net.IPNet
+	var v6 net.IP
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		v4 = fetchPublicIP("https://ipv4.icanhazip.com")
 	})
 	wg.Go(func() {
-		v6nets = globalIPv6FromInterfaces()
-		if len(v6nets) == 0 {
-			if ip := fetchPublicIP("https://ipv6.icanhazip.com"); ip != nil {
-				v6nets = []net.IPNet{{IP: ip, Mask: net.CIDRMask(128, 128)}}
-			}
+		v6 = publicIPv6()
+		if v6 == nil {
+			v6 = fetchPublicIP("https://ipv6.icanhazip.com")
 		}
 	})
 	wg.Wait()
 	if v4 != nil {
-		c.IPs = append(c.IPs, net.IPNet{IP: v4.To4(), Mask: net.CIDRMask(32, 32)})
+		c.IPs = append(c.IPs, v4.To4())
 	}
-	c.IPs = append(c.IPs, v6nets...)
+	if v6 != nil {
+		c.IPs = append(c.IPs, v6)
+	}
 }
 
 func fetchPublicIP(url string) net.IP {
@@ -95,31 +95,19 @@ func fetchPublicIP(url string) net.IP {
 	return net.ParseIP(strings.TrimSpace(string(body)))
 }
 
-func globalIPv6FromInterfaces() []net.IPNet {
-	var result []net.IPNet
-	ifaces, err := net.Interfaces()
+// publicIPv6 gets the public IPv6 address by asking the OS which source address
+// it would use to reach a well-known IPv6 destination (Google DNS).
+func publicIPv6() net.IP {
+	conn, err := net.DialTimeout("udp6", "[2001:4860:4860::8888]:53", 2*time.Second)
 	if err != nil {
 		return nil
 	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			if ipNet.IP.To4() != nil {
-				continue
-			}
-			if ipNet.IP.IsGlobalUnicast() && !ipNet.IP.IsPrivate() {
-				result = append(result, *ipNet)
-			}
-		}
+	defer conn.Close()
+	addr := conn.LocalAddr().(*net.UDPAddr)
+	if addr.IP.IsGlobalUnicast() && !addr.IP.IsPrivate() {
+		return addr.IP
 	}
-	return result
+	return nil
 }
 
 func (c *Client) encrypt(message []byte) (out []byte, err error) {
@@ -180,9 +168,8 @@ func (c *Client) send(host string, port int) error {
 
 func (c *Client) sendAllPackets(conn *net.UDPConn) error {
 	var errs []error
-	for _, ipNet := range c.IPs {
-		ones, _ := ipNet.Mask.Size()
-		if msg, err := MessageV2(ipNet.IP, uint8(ones)); err != nil {
+	for _, ip := range c.IPs {
+		if msg, err := Message(ip); err != nil {
 			errs = append(errs, err)
 		} else {
 			errs = append(errs, c.sendPacket(conn, msg))

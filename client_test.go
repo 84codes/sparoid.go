@@ -122,14 +122,14 @@ func TestClientSendsBothIPv4AndIPv6(t *testing.T) {
 	}()
 
 	buf := make([]byte, 512)
-	// Expect 2 packets: IPv4 (80 bytes) + IPv6 (96 bytes)
+	// Expect 2 packets: both 96 bytes (32/44 bytes pad to 48 -> +16 IV = 64 -> +32 HMAC = 96)
 	for i := 0; i < 2; i++ {
 		n, _, err := server.ReadFrom(buf)
 		if err != nil {
 			t.Fatalf("packet %d: unexpected error: %s", i, err)
 		}
-		if n != 80 && n != 96 {
-			t.Errorf("packet %d: expected length 80 or 96, got %d", i, n)
+		if n != 96 {
+			t.Errorf("packet %d: expected length 96, got %d", i, n)
 		}
 	}
 }

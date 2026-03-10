@@ -46,19 +46,23 @@ func NewClient(key, hmacKey string) (c *Client, err error) {
 		key:     decodedKey,
 		hmacKey: decodedHmacKey,
 	}
-	c.resolvePublicIPs()
+	if err = c.resolvePublicIPs(); err != nil {
+		return
+	}
 	return
 }
 
 // Auth is the main function for the client
 func (c *Client) Auth(host string, port int) (err error) {
-	c.resolvePublicIPs()
+	if err = c.resolvePublicIPs(); err != nil {
+		return
+	}
 	return c.send(host, port)
 }
 
-func (c *Client) resolvePublicIPs() {
+func (c *Client) resolvePublicIPs() error {
 	if len(c.IPs) > 0 {
-		return
+		return nil
 	}
 	var v4 net.IP
 	var v6 net.IP
@@ -79,6 +83,10 @@ func (c *Client) resolvePublicIPs() {
 	if v6 != nil {
 		c.IPs = append(c.IPs, v6)
 	}
+	if len(c.IPs) == 0 {
+		return fmt.Errorf("failed to resolve any public IP addresses")
+	}
+	return nil
 }
 
 func fetchPublicIP(url string) net.IP {
@@ -148,22 +156,24 @@ func (c *Client) send(host string, port int) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, addr := range addrs {
 		serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr, fmt.Sprintf("%d", port)))
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		conn, err := net.DialUDP("udp", nil, serverAddr)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if err := c.sendAllPackets(conn); err != nil {
-			conn.Close()
-			return err
+			errs = append(errs, err)
 		}
 		conn.Close()
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (c *Client) sendAllPackets(conn *net.UDPConn) error {

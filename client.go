@@ -173,7 +173,11 @@ func (c *Client) send(host string, port int) error {
 		}
 		conn.Close()
 	}
-	return errors.Join(errs...)
+
+	if len(errs) == len(addrs) {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 func (c *Client) sendAllPackets(conn *net.UDPConn) error {
@@ -185,7 +189,11 @@ func (c *Client) sendAllPackets(conn *net.UDPConn) error {
 			errs = append(errs, c.sendPacket(conn, msg))
 		}
 	}
-	return errors.Join(errs...)
+
+	if len(errs) == len(c.IPs) {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 func (c *Client) sendPacket(conn *net.UDPConn, msg []byte) error {

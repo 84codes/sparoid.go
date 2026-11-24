@@ -103,7 +103,6 @@ var (
 	osPublicIPv6 = publicIPv6
 )
 
-// firstPublicIP tries the URLs one at a time, the next only if the previous failed
 func firstPublicIP(urls []string, valid func(net.IP) bool) net.IP {
 	for _, url := range urls {
 		body, err := fetchURL(url)

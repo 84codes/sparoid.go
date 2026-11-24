@@ -68,12 +68,12 @@ func (c *Client) resolvePublicIPs() error {
 	var v6 net.IP
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		v4 = fetchPublicIP("https://ipv4.icanhazip.com")
+		v4 = firstPublicIP(ipv4URLs, isPublicIPv4)
 	})
 	wg.Go(func() {
-		v6 = publicIPv6()
+		v6 = osPublicIPv6()
 		if v6 == nil {
-			v6 = fetchPublicIP("https://ipv6.icanhazip.com")
+			v6 = firstPublicIP(ipv6URLs, isPublicIPv6)
 		}
 	})
 	wg.Wait()
@@ -89,18 +89,56 @@ func (c *Client) resolvePublicIPs() error {
 	return nil
 }
 
-func fetchPublicIP(url string) net.IP {
+var (
+	ipv4URLs = []string{
+		"https://ipv4.icanhazip.com",
+		"https://checkip.amazonaws.com",
+		"https://api.ipify.org",
+	}
+	ipv6URLs = []string{
+		"https://ipv6.icanhazip.com",
+		"https://api6.ipify.org",
+	}
+	fetchURL     = httpGet
+	osPublicIPv6 = publicIPv6
+)
+
+func firstPublicIP(urls []string, valid func(net.IP) bool) net.IP {
+	for _, url := range urls {
+		body, err := fetchURL(url)
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(strings.TrimSpace(body)); ip != nil && valid(ip) {
+			return ip
+		}
+	}
+	return nil
+}
+
+func httpGet(url string) (string, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil
+		return "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: %s", url, resp.Status)
 	}
-	return net.ParseIP(strings.TrimSpace(string(body)))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func isPublicIPv4(ip net.IP) bool {
+	return ip.To4() != nil
+}
+
+func isPublicIPv6(ip net.IP) bool {
+	return ip.To4() == nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
 }
 
 // publicIPv6 gets the public IPv6 address by asking the OS which source address
@@ -112,7 +150,7 @@ func publicIPv6() net.IP {
 	}
 	defer conn.Close()
 	addr := conn.LocalAddr().(*net.UDPAddr)
-	if addr.IP.IsGlobalUnicast() && !addr.IP.IsPrivate() {
+	if isPublicIPv6(addr.IP) {
 		return addr.IP
 	}
 	return nil
